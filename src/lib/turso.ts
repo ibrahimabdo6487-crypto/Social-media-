@@ -43,12 +43,17 @@ export function ensureSchema(): Promise<void> {
 }
 
 export async function dbHealthy(): Promise<boolean> {
+  return (await dbCheck()).ok;
+}
+// فحص مع سبب الفشل (الرسالة فقط، بلا أي أسرار) لتسهيل التشخيص
+export async function dbCheck(): Promise<{ ok: boolean; error?: string }> {
   try {
+    if (!process.env.TURSO_DATABASE_URL) return { ok: false, error: "TURSO_DATABASE_URL غير مضبوط" };
     await ensureSchema();
     await db().execute("SELECT 1");
-    return true;
-  } catch {
-    return false;
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: String((e as Error).message || e).replace(/eyJ[\w.-]+/g, "***").slice(0, 300) };
   }
 }
 
