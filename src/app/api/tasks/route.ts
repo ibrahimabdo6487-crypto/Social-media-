@@ -1,16 +1,19 @@
-import { listRecentTasks, taskStats } from "@/lib/turso";
+// src/app/api/tasks/route.ts — قائمة المهام الأخيرة + الإحصاءات (لوحة المتابعة الحية)
+import { NextRequest, NextResponse } from "next/server";
+import { ensureSchema, listRecentTasks, taskStats } from "@/lib/turso";
+
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-export async function GET() {
-  const [tasks, stats] = await Promise.all([listRecentTasks(30), taskStats()]);
-  // لا نكشف رسائل الانتظار الداخلية للمفاتيح؛ الواجهة تعرض فقط عدد المحاولات
-  return Response.json({
-    stats,
-    tasks: tasks.map((t) => ({
-      id: t.id, type: t.type, status: t.status, progress: t.progress, model: t.model, prompt: t.prompt.slice(0, 120),
-      created_at: t.created_at, result_urls: t.result_urls, attempts: t.attempts.length,
-      error: t.status === "failed" ? t.error_message : null,
-    })),
-  });
+export async function GET(req: NextRequest) {
+  try {
+    await ensureSchema();
+    const type = req.nextUrl.searchParams.get("type") ?? undefined;
+    const status = req.nextUrl.searchParams.get("status") ?? undefined;
+    const limit = Math.min(30, Math.max(1, Number(req.nextUrl.searchParams.get("limit") ?? 20) || 20));
+    const [tasks, stats] = await Promise.all([listRecentTasks(limit, { type, status }), taskStats()]);
+    return NextResponse.json({ tasks, stats });
+  } catch (e) {
+    return NextResponse.json({ error: `فشل جلب المهام: ${(e as Error).message}` }, { status: 500 });
+  }
 }

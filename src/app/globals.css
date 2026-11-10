@@ -1,2 +1,26 @@
-@import "tailwindcss";
-body { font-family: "Segoe UI", Tahoma, "Noto Sans Arabic", system-ui, sans-serif; background:#0b1020; color:#e5e7eb; }
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url("https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap");
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  background:
+    radial-gradient(1200px 600px at 85% -10%, rgba(167, 139, 250, 0.14), transparent),
+    radial-gradient(1000px 500px at 8% 110%, rgba(34, 211, 238, 0.12), transparent),
+    #0a0e17;
+}
+
+/* شريط تقدم أنيق */
+.bar-fill {
+  background: linear-gradient(90deg, #22d3ee, #a78bfa);
+}
+
+/* رموز الحالة */
+.chip {
+  @apply inline-block rounded-full px-2.5 py-0.5 text-[11px] font-bold border;
+}

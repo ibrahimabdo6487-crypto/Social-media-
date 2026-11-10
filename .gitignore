@@ -1,8 +1,18 @@
-node_modules
-.next
-.env*
-!.env.example
-*.db
-*.tsbuildinfo
+# التبعيات والبناء
+node_modules/
+.next/
+out/
 next-env.d.ts
+*.tsbuildinfo
+
+# بيئة محلية — لا تُرفع أبدًا (تحتوي بيانات Turso)
+.env
+.env.*
+!.env.example
+
+# Vercel
 .vercel
+
+# سجلات
+*.log
+npm-debug.log*

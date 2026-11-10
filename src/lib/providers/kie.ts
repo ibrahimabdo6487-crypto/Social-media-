@@ -1,32 +1,77 @@
-// kie.ai — Jobs API الموحد
-import type { ProviderAdapter } from "./types";
-import { jfetch } from "./http";
-import { ProviderError } from "../keys";
+// src/lib/providers/kie.ts — المزود الأساسي: kie.ai Jobs API الموحد
+// الأشكال مقاسة فعليًا بنداءات حقيقية (createTask / recordInfo) وليست مخترعة
+import { ProviderError, type ProviderAdapter, type ProviderTaskInput, type ProviderCheckResult } from "./types";
 
-const BASE = (process.env.KIE_API_BASE || "https://api.kie.ai") + "/api/v1/jobs"; // KIE_API_BASE للاختبار المحلي فقط
-const auth = (k: string) => ({ Authorization: `Bearer ${k}`, "Content-Type": "application/json" });
+const BASE = "https://api.kie.ai/api/v1/jobs";
 
-export const kie: ProviderAdapter = {
-  id: "kie",
-  async createTask(key, model, input) {
-    const r = await jfetch(`${BASE}/createTask`, { method: "POST", headers: auth(key), body: JSON.stringify({ model, input }) });
-    const id = r?.data?.taskId;
-    if (!id) throw new ProviderError(502, "kie: no taskId in response");
-    return { providerTaskId: String(id) };
+async function callApi(path: string, init: RequestInit): Promise<Record<string, unknown>> {
+  let res: Response;
+  try {
+    res = await fetch(`${BASE}${path}`, init);
+  } catch (e) {
+    throw new ProviderError(0, `network error: ${(e as Error).message}`);
+  }
+  const text = await res.text();
+  let body: Record<string, unknown> = {};
+  try { body = JSON.parse(text); } catch { /* جسم غير JSON */ }
+  if (!res.ok) {
+    throw new ProviderError(res.status, String(body.msg ?? body.message ?? text.slice(0, 300) ?? `HTTP ${res.status}`));
+  }
+  if (body.code !== undefined && Number(body.code) !== 200) {
+    // بعض المزودين يرسلون نفاد الرصيد بحالة HTTP 200 وكود داخلي ≠ 200 — الرسالة تُصنَّف لاحقًا
+    throw new ProviderError(Number(body.code) === 401 ? 401 : 400, String(body.msg ?? "unknown provider error"));
+  }
+  return body;
+}
+
+export const kieAdapter: ProviderAdapter = {
+  async createTask(key: string, model: string, input: ProviderTaskInput) {
+    const body = await callApi("/createTask", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+      body: JSON.stringify({ model, input: buildInput(input) }),
+    });
+    const data = body.data as { taskId?: string } | undefined;
+    if (!data?.taskId) throw new ProviderError(400, "createTask: no taskId in response");
+    return { providerTaskId: data.taskId };
   },
-  async checkTask(key, taskId) {
-    const r = await jfetch(`${BASE}/recordInfo?taskId=${encodeURIComponent(taskId)}`, { headers: auth(key) });
-    const d = r?.data ?? {};
-    const state = String(d.state ?? "").toLowerCase();
-    if (state === "success") {
-      // resultJson نص JSON داخل JSON → parse ثانٍ
-      let urls: string[] = [];
-      try { urls = JSON.parse(d.resultJson || "{}").resultUrls ?? []; } catch { /* */ }
-      if (!urls.length) return { status: "failed", error: "no result urls" };
-      return { status: "completed", urls, progress: 100 };
+
+  async checkTask(key: string, providerTaskId: string): Promise<ProviderCheckResult> {
+    const body = await callApi(`/recordInfo?taskId=${encodeURIComponent(providerTaskId)}`, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${key}` },
+    });
+    const data = body.data as Record<string, unknown> | undefined;
+    if (!data) throw new ProviderError(400, "recordInfo: no data");
+    const state = String(data.state ?? "");
+    // resultJson نص JSON داخل JSON — يحتاج JSON.parse ثانيًا (شكل حقيقي مقاس)
+    let urls: string[] = [];
+    if (typeof data.resultJson === "string" && data.resultJson) {
+      try {
+        const parsed = JSON.parse(data.resultJson) as { resultUrls?: string[] };
+        urls = parsed.resultUrls ?? [];
+      } catch { /* تجاهل */ }
     }
-    if (state === "fail") return { status: "failed", error: String(d.failMsg || d.failCode || "generation failed") };
-    const prog = state === "generating" ? 50 : state === "queuing" ? 15 : 5;
-    return { status: "processing", progress: prog };
+    if (state === "success") return { status: "completed", urls, progress: 100 };
+    if (state === "fail") {
+      return { status: "failed", error: String(data.failMsg ?? "unknown failure") };
+    }
+    // waiting | queuing | generating — تقدّم تقديري (kie لا يرسل رقمًا)
+    const progress = state === "generating" ? 55 : state === "queuing" ? 15 : 5;
+    return { status: "processing", progress };
   },
 };
+
+function buildInput(input: ProviderTaskInput): Record<string, unknown> {
+  const o: Record<string, unknown> = { prompt: input.prompt };
+  if (input.aspect_ratio && input.aspect_ratio !== "auto") o.aspect_ratio = input.aspect_ratio;
+  // الصور: 1K/2K/4K — الفيديو: 480p/720p/1080p — auto يعني إرسال الإعداد الافتراضي للمزود
+  if (input.resolution && input.resolution !== "auto") o.resolution = input.resolution;
+  if (input.background && input.background !== "auto") o.background = input.background;
+  if (input.output_format) o.output_format = input.output_format;
+  // معطيات الفيديو
+  if (input.image_url) o.image_url = input.image_url;
+  if (input.enable_audio !== undefined) o.enable_audio = input.enable_audio;
+  if (input.duration) o.duration = input.duration;
+  return o;
+}

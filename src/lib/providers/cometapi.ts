@@ -1,37 +1,96 @@
-// CometAPI — صور متزامنة (OpenAI images) وفيديو عبر مهام غير متزامنة.
-// ملاحظة: أشكال CometAPI لم تُختبر حيًا (الشبكة محجوبة أثناء البناء) — راجع api.cometapi.com عند الحاجة.
-import type { ProviderAdapter } from "./types";
-import { jfetch } from "./http";
-import { ProviderError } from "../keys";
+// src/lib/providers/cometapi.ts — المزود الثاني: CometAPI (متوافق مع أشكال OpenAI)
+// مقاس فعليًا: /v1/models و /v1/videos موجودان (401 invalid token بدل 404 Invalid URL)
+// الصور متزامنة عبر /v1/images/generations (تعيد url أو b64_json فورًا)
+// الفيديو غير متزامن عبر /v1/videos (إنشاء → GET حالة → محتوى)
+import { ProviderError, type ProviderAdapter, type ProviderTaskInput, type ProviderCheckResult } from "./types";
 
 const BASE = "https://api.cometapi.com";
-const auth = (k: string) => ({ Authorization: `Bearer ${k}`, "Content-Type": "application/json" });
 
-export const cometapi: ProviderAdapter = {
-  id: "cometapi",
-  async createImageSync(key, model, input) {
-    const body: Record<string, unknown> = { model, prompt: input.prompt, n: 1 };
-    if (input.aspect_ratio && input.aspect_ratio !== "auto") body.size = input.aspect_ratio;
-    if (input.output_format) body.output_format = input.output_format;
-    const r = await jfetch(`${BASE}/v1/images/generations`, { method: "POST", headers: auth(key), body: JSON.stringify(body), timeoutMs: 120000 });
-    const urls = (r?.data ?? []).map((x: any) => x.url || (x.b64_json ? `data:image/png;base64,${x.b64_json}` : null)).filter(Boolean);
-    if (!urls.length) throw new ProviderError(502, "cometapi: no image in response");
+async function callApi(path: string, init: RequestInit): Promise<Record<string, unknown>> {
+  let res: Response;
+  try {
+    res = await fetch(`${BASE}${path}`, init);
+  } catch (e) {
+    throw new ProviderError(0, `network error: ${(e as Error).message}`);
+  }
+  const text = await res.text();
+  let body: Record<string, unknown> = {};
+  try { body = JSON.parse(text); } catch { /* جسم غير JSON */ }
+  if (!res.ok) {
+    const errObj = (body.error ?? {}) as Record<string, unknown>;
+    throw new ProviderError(res.status, String(errObj.message ?? body.message ?? text.slice(0, 300) ?? `HTTP ${res.status}`));
+  }
+  return body;
+}
+
+// تحويل نسبة الأبعاد إلى أبعاد OpenAI للفيديو (أقرب أبعاد مدعومة)
+function videoSize(ar?: string, resolution?: string): string | undefined {
+  if (!ar || ar === "auto") return undefined;
+  const hd = resolution === "1080p" ? { w: 1440, h: 1080 } : resolution === "720p" ? { w: 1280, h: 720 } : { w: 720, h: 480 };
+  const map: Record<string, [number, number]> = {
+    "16:9": [hd.w, Math.round((hd.w * 9) / 16)],
+    "9:16": [Math.round((hd.w * 9) / 16), hd.w],
+    "1:1": [hd.w, hd.w],
+    "3:2": [hd.w, Math.round((hd.w * 2) / 3)],
+    "2:3": [Math.round((hd.w * 2) / 3), hd.w],
+  };
+  const m = map[ar];
+  if (!m) return undefined;
+  const even = (n: number) => n - (n % 2);
+  return `${even(m[0])}x${even(m[1])}`;
+}
+
+export const cometapiAdapter: ProviderAdapter = {
+  // صور متزامنة — النتيجة فورًا بلا مهمة
+  async createImageSync(key: string, input: ProviderTaskInput) {
+    const body = await callApi("/v1/images/generations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+      body: JSON.stringify({ model: input.model, prompt: input.prompt, n: 1 }),
+    });
+    const data = body.data as Array<{ url?: string; b64_json?: string }> | undefined;
+    if (!Array.isArray(data) || !data.length) throw new ProviderError(400, "images/generations: no data");
+    const urls = data
+      .map((d) => d.url ?? (d.b64_json ? `data:image/png;base64,${d.b64_json}` : null))
+      .filter((u): u is string => !!u);
+    if (!urls.length) throw new ProviderError(400, "images/generations: no urls");
     return { urls };
   },
-  async createTask(key, model, input) {
-    const r = await jfetch(`${BASE}/v1/videos`, { method: "POST", headers: auth(key), body: JSON.stringify({ model, ...input }) });
-    const id = r?.id || r?.data?.id || r?.task_id;
-    if (!id) throw new ProviderError(502, "cometapi: no task id in response");
+
+  // فيديو غير متزامن
+  async createTask(key: string, model: string, input: ProviderTaskInput) {
+    const payload: Record<string, unknown> = {
+      model,
+      prompt: input.prompt + (input.image_url ? ` [first-frame: ${input.image_url}]` : ""),
+      seconds: String(input.duration ?? 8),
+    };
+    const size = videoSize(input.aspect_ratio, input.resolution);
+    if (size) payload.size = size;
+    const body = await callApi("/v1/videos", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+      body: JSON.stringify(payload),
+    });
+    const id = body.id ?? (body.data as Record<string, unknown> | undefined)?.id;
+    if (!id) throw new ProviderError(400, "videos: no job id in response");
     return { providerTaskId: String(id) };
   },
-  async checkTask(key, id) {
-    const r = await jfetch(`${BASE}/v1/videos/${encodeURIComponent(id)}`, { headers: auth(key) });
-    const st = String(r?.status ?? r?.data?.status ?? "").toLowerCase();
-    if (/complete|succe/.test(st)) {
-      const u = r?.video_url || r?.url || r?.data?.url || r?.data?.video_url;
-      return u ? { status: "completed", urls: [u], progress: 100 } : { status: "failed", error: "no video url" };
+
+  async checkTask(key: string, providerTaskId: string): Promise<ProviderCheckResult> {
+    const body = await callApi(`/v1/videos/${encodeURIComponent(providerTaskId)}`, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${key}` },
+    });
+    const status = String(body.status ?? "");
+    if (status === "completed") {
+      // رابط المحتوى الرسمي لدى المزود (يتطلب المفتاح للتنزيل — قيد موثق)
+      return { status: "completed", urls: [`${BASE}/v1/videos/${providerTaskId}/content`], progress: 100 };
     }
-    if (/fail|error|cancel/.test(st)) return { status: "failed", error: String(r?.error?.message || r?.error || "failed") };
-    return { status: "processing", progress: Number(r?.progress ?? 10) };
+    if (status === "failed") {
+      const errObj = (body.error ?? {}) as Record<string, unknown>;
+      return { status: "failed", error: String(errObj.message ?? "video generation failed") };
+    }
+    // queued | in_progress — تقدّم تقديري
+    return { status: "processing", progress: status === "in_progress" ? 55 : 15 };
   },
 };
